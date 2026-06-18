@@ -1,0 +1,19 @@
+{
+  "name": "@matias9477/expo-release",
+  "version": "1.0.0",
+  "description": "Interactive release CLI for Expo + EAS apps: bumps version, builds for iOS, submits to TestFlight, and commits the bump.",
+  "type": "module",
+  "bin": {
+    "expo-release": "./release.mjs"
+  },
+  "files": [
+    "release.mjs"
+  ],
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "dependencies": {
+    "inquirer": "^12.11.1"
+  },
+  "license": "MIT"
+}
