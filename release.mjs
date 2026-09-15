@@ -127,20 +127,35 @@ async function main() {
 
   const config = loadConfig();
 
+  const appJsonOrig = fs.readFileSync(appJsonPath, 'utf8');
+  const pkgJsonOrig = fs.readFileSync(pkgJsonPath, 'utf8');
+
+  const appJson = JSON.parse(appJsonOrig);
+  const pkgJson = JSON.parse(pkgJsonOrig);
+
+  const appVersion = appJson.expo.version;
+  const pkgVersion = pkgJson.version;
+
+  if (appVersion !== pkgVersion) {
+    console.error(
+      `\nVersion mismatch between app.json (${appVersion}) and package.json (${pkgVersion}).\n` +
+        `Reconcile both files to the intended current version before running the release script.`,
+    );
+    process.exit(1);
+  }
+
+  const oldVersion = appVersion;
+
   let updateType;
 
   if (await isFirstRelease()) {
-    const currentVersion = JSON.parse(
-      fs.readFileSync(pkgJsonPath, 'utf8'),
-    ).version;
-
     const { confirmFirst } = await inquirer.prompt([
       {
         type: 'confirm',
         name: 'confirmFirst',
         message:
           `No prior release found in git history. Ship the current version ` +
-          `(v${currentVersion}) as your first release, without bumping?`,
+          `(v${oldVersion}) as your first release, without bumping?`,
         default: true,
       },
     ]);
@@ -155,37 +170,28 @@ async function main() {
         name: 'updateType',
         message: 'What type of update is this?',
         choices: [
-          { name: 'Patch (bugfix, e.g. 1.0.0 → 1.0.1)', value: 'patch' },
-          { name: 'Minor (feature, e.g. 1.0.0 → 1.1.0)', value: 'minor' },
-          { name: 'Major (breaking, e.g. 1.0.0 → 2.0.0)', value: 'major' },
+          {
+            name: `Patch (bugfix, ${oldVersion} → ${incVersion(oldVersion, 'patch')})`,
+            value: 'patch',
+          },
+          {
+            name: `Minor (feature, ${oldVersion} → ${incVersion(oldVersion, 'minor')})`,
+            value: 'minor',
+          },
+          {
+            name: `Major (breaking, ${oldVersion} → ${incVersion(oldVersion, 'major')})`,
+            value: 'major',
+          },
         ],
       },
     ]));
   }
-
-  const appJsonOrig = fs.readFileSync(appJsonPath, 'utf8');
-  const pkgJsonOrig = fs.readFileSync(pkgJsonPath, 'utf8');
 
   let versionUpdated = false;
   let buildCompleted = false;
   let bumpCommitted = false;
 
   try {
-    const appJson = JSON.parse(appJsonOrig);
-    const pkgJson = JSON.parse(pkgJsonOrig);
-
-    const appVersion = appJson.expo.version;
-    const pkgVersion = pkgJson.version;
-
-    if (appVersion !== pkgVersion) {
-      console.error(
-        `\nVersion mismatch between app.json (${appVersion}) and package.json (${pkgVersion}).\n` +
-          `Reconcile both files to the intended current version before running the release script.`,
-      );
-      process.exit(1);
-    }
-
-    const oldVersion = appVersion;
     const newVersion = incVersion(oldVersion, updateType);
 
     appJson.expo.version = newVersion;
