@@ -36,13 +36,19 @@ function loadConfig() {
   }
 }
 
+function quoteArgs(args) {
+  return args
+    .map(arg => (/\s/.test(arg) ? `"${arg}"` : arg))
+    .join(' ');
+}
+
 function runGit(args) {
   return new Promise((resolve, reject) => {
     const proc = spawn('git', args, { stdio: 'inherit', shell: false });
 
     proc.on('close', code => {
       if (code === 0) resolve();
-      else reject(new Error(`git ${args.join(' ')} failed with exit code ${code}`));
+      else reject(new Error(`git ${quoteArgs(args)} failed with exit code ${code}`));
     });
   });
 }
@@ -56,15 +62,47 @@ function runCommand(command, args = []) {
 
     proc.on('close', code => {
       if (code === 0) resolve();
-      else reject(new Error(`${command} ${args.join(' ')} failed with exit code ${code}`));
+      else reject(new Error(`${command} ${quoteArgs(args)} failed with exit code ${code}`));
     });
   });
+}
+
+function gitOutput(args) {
+  return new Promise(resolve => {
+    const proc = spawn('git', args, {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      shell: false,
+    });
+
+    let out = '';
+    proc.stdout.on('data', chunk => (out += chunk));
+    proc.on('close', () => resolve(out.trim()));
+    proc.on('error', () => resolve(''));
+  });
+}
+
+/**
+ * A release is the "first" one only when nothing has ever been shipped, which
+ * we infer from git history rather than the version string (an app can sit at
+ * 1.0.0 and already be released). Signals: a prior `chore(release):` commit
+ * created by this tool, or any `v*` tag.
+ */
+async function isFirstRelease() {
+  const subjects = await gitOutput(['log', '--format=%s']);
+  if (subjects.split('\n').some(s => s.startsWith('chore(release):'))) {
+    return false;
+  }
+
+  const tags = await gitOutput(['tag', '--list', 'v*']);
+  return tags.length === 0;
 }
 
 function incVersion(version, type) {
   let [major, minor, patch] = version.split('.').map(Number);
 
-  if (type === 'major') {
+  if (type === 'none') {
+    // First release: keep the version as-is, only the iOS build number bumps.
+  } else if (type === 'major') {
     major++;
     minor = 0;
     patch = 0;
@@ -89,23 +127,48 @@ async function main() {
 
   const config = loadConfig();
 
-  const { updateType } = await inquirer.prompt([
-    {
-      type: 'list',
-      name: 'updateType',
-      message: 'What type of update is this?',
-      choices: [
-        { name: 'Patch (bugfix, e.g. 1.0.0 → 1.0.1)', value: 'patch' },
-        { name: 'Minor (feature, e.g. 1.0.0 → 1.1.0)', value: 'minor' },
-        { name: 'Major (breaking, e.g. 1.0.0 → 2.0.0)', value: 'major' },
-      ],
-    },
-  ]);
+  let updateType;
+
+  if (await isFirstRelease()) {
+    const currentVersion = JSON.parse(
+      fs.readFileSync(pkgJsonPath, 'utf8'),
+    ).version;
+
+    const { confirmFirst } = await inquirer.prompt([
+      {
+        type: 'confirm',
+        name: 'confirmFirst',
+        message:
+          `No prior release found in git history. Ship the current version ` +
+          `(v${currentVersion}) as your first release, without bumping?`,
+        default: true,
+      },
+    ]);
+
+    if (confirmFirst) updateType = 'none';
+  }
+
+  if (!updateType) {
+    ({ updateType } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'updateType',
+        message: 'What type of update is this?',
+        choices: [
+          { name: 'Patch (bugfix, e.g. 1.0.0 → 1.0.1)', value: 'patch' },
+          { name: 'Minor (feature, e.g. 1.0.0 → 1.1.0)', value: 'minor' },
+          { name: 'Major (breaking, e.g. 1.0.0 → 2.0.0)', value: 'major' },
+        ],
+      },
+    ]));
+  }
 
   const appJsonOrig = fs.readFileSync(appJsonPath, 'utf8');
   const pkgJsonOrig = fs.readFileSync(pkgJsonPath, 'utf8');
 
   let versionUpdated = false;
+  let buildCompleted = false;
+  let bumpCommitted = false;
 
   try {
     const appJson = JSON.parse(appJsonOrig);
@@ -150,7 +213,10 @@ async function main() {
     ]);
 
     if (!buildIos) {
-      console.log('Release cancelled.');
+      fs.writeFileSync(appJsonPath, appJsonOrig, 'utf8');
+      fs.writeFileSync(pkgJsonPath, pkgJsonOrig, 'utf8');
+
+      console.log('Release cancelled. Version bump reverted.');
       process.exit(0);
     }
 
@@ -174,6 +240,27 @@ async function main() {
     ]);
 
     console.log('iOS build complete.');
+
+    buildCompleted = true;
+
+    // The build now exists on EAS with the new version and buildNumber, so
+    // the bump is a fact regardless of what happens with TestFlight. Commit
+    // it before submitting so a submit failure can't leave the repo out of
+    // sync with the build that was already created.
+    console.log('\nCommitting version bump...');
+
+    const commitMessage = `chore(release): v${newVersion}`;
+
+    await runGit(['add', 'app.json', 'package.json']);
+    // --no-verify: this is a machine-generated version bump of two JSON files.
+    // Project pre-commit hooks (e.g. `prettier --check`, `tsc --noEmit`) would
+    // otherwise gate the release on unrelated repo state and abort the commit.
+    await runGit(['commit', '--no-verify', '-m', commitMessage]);
+    await runGit(['push']);
+
+    bumpCommitted = true;
+
+    console.log(`Pushed: ${commitMessage}`);
 
     const { submitIos } = await inquirer.prompt([
       {
@@ -230,25 +317,22 @@ async function main() {
       console.log('Skipped TestFlight submission.');
     }
 
-    console.log('\nCommitting version bump...');
-
-    const commitMessage = `chore(release): v${newVersion}`;
-
-    await runGit(['add', 'app.json', 'package.json']);
-    await runGit(['commit', '-m', commitMessage]);
-    await runGit(['push']);
-
-    console.log(`Pushed: ${commitMessage}`);
-
     console.log('\nRelease complete!');
     console.log(`Version: ${newVersion}`);
     console.log(`iOS buildNumber: ${appJson.expo.ios.buildNumber}`);
   } catch (err) {
-    if (versionUpdated) {
+    if (versionUpdated && !buildCompleted) {
       fs.writeFileSync(appJsonPath, appJsonOrig, 'utf8');
       fs.writeFileSync(pkgJsonPath, pkgJsonOrig, 'utf8');
 
       console.error('\nVersion numbers reverted due to failure.');
+    } else if (buildCompleted && !bumpCommitted) {
+      // The EAS build was created with the new version, so reverting would
+      // desync the repo from it — keep the bump and let the user commit it.
+      console.error(
+        '\nThe EAS build was already created with the new version, so ' +
+          'app.json and package.json were left bumped. Commit them manually.',
+      );
     }
 
     throw err;
