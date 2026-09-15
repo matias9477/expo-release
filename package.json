@@ -1,6 +1,6 @@
 {
   "name": "@matias9477/expo-release",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Interactive release CLI for Expo + EAS apps: bumps version, builds for iOS, submits to TestFlight, and commits the bump.",
   "type": "module",
   "bin": {
