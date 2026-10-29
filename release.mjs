@@ -135,6 +135,82 @@ async function isFirstRelease() {
   return tags.length === 0;
 }
 
+const SEMVER = /^\d+\.\d+\.\d+$/;
+
+/** Negative when a < b, 0 when equal, positive when a > b (x.y.z only). */
+function compareVersions(a, b) {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if (pa[i] !== pb[i]) return pa[i] - pb[i];
+  }
+  return 0;
+}
+
+/**
+ * Validates a version the user typed (menu or --version). The current version
+ * itself is allowed: it ships a new build of the same version, which is how a
+ * scaffold sitting at 1.0.0 goes out as 1.0.0.
+ */
+function validateExplicitVersion(version, current) {
+  if (!SEMVER.test(version)) return `"${version}" is not a version like 1.0.0.`;
+  if (compareVersions(version, current) < 0) {
+    return `${version} is lower than the current version ${current}; the App Store rejects downgrades.`;
+  }
+  return true;
+}
+
+/** `--version 1.0.0` or `--version=1.0.0`; null when the flag is absent. */
+function parseVersionFlag(argv) {
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--version') {
+      if (!argv[i + 1]) {
+        console.error('--version needs a value, e.g. --version 1.0.0');
+        process.exit(1);
+      }
+      return argv[i + 1];
+    }
+    if (argv[i].startsWith('--version=')) return argv[i].slice('--version='.length);
+  }
+  return null;
+}
+
+/**
+ * Runs one release step and, when it fails, asks what to do instead of dying:
+ * retry it, skip it (only where `skip` is given; its hint says how to finish
+ * the step by hand), or abort. Extra choices let a step offer its own way
+ * forward. Resolves to 'done', 'skipped' or an extra choice's value; abort
+ * rethrows so main()'s cleanup runs.
+ */
+async function runStep(label, fn, { skip = null, extraChoices = [] } = {}) {
+  for (;;) {
+    try {
+      await fn();
+      return 'done';
+    } catch (err) {
+      console.error(`\n${label} failed: ${err.message}`);
+
+      const { action } = await inquirer.prompt([
+        {
+          type: 'list',
+          name: 'action',
+          message: `${label} failed. What now?`,
+          choices: [
+            { name: 'Retry', value: 'retry' },
+            ...extraChoices,
+            ...(skip ? [{ name: `Skip (${skip})`, value: 'skip' }] : []),
+            { name: 'Abort the release', value: 'abort' },
+          ],
+        },
+      ]);
+
+      if (action === 'retry') continue;
+      if (action === 'abort') throw err;
+      return action === 'skip' ? 'skipped' : action;
+    }
+  }
+}
+
 function incVersion(version, type) {
   let [major, minor, patch] = version.split('.').map(Number);
 
@@ -184,9 +260,24 @@ async function main() {
 
   const oldVersion = appVersion;
 
+  if (!SEMVER.test(oldVersion)) {
+    console.error(`\nCurrent version "${oldVersion}" is not a plain x.y.z version.`);
+    process.exit(1);
+  }
+
+  let newVersion = parseVersionFlag(process.argv.slice(2));
+
+  if (newVersion !== null) {
+    const valid = validateExplicitVersion(newVersion, oldVersion);
+    if (valid !== true) {
+      console.error(`\n${valid}`);
+      process.exit(1);
+    }
+  }
+
   let updateType;
 
-  if (await isFirstRelease()) {
+  if (newVersion === null && (await isFirstRelease())) {
     const { confirmFirst } = await inquirer.prompt([
       {
         type: 'confirm',
@@ -201,7 +292,7 @@ async function main() {
     if (confirmFirst) updateType = 'none';
   }
 
-  if (!updateType) {
+  if (newVersion === null && !updateType) {
     ({ updateType } = await inquirer.prompt([
       {
         type: 'list',
@@ -220,18 +311,35 @@ async function main() {
             name: `Major (breaking, ${oldVersion} → ${incVersion(oldVersion, 'major')})`,
             value: 'major',
           },
+          {
+            name: 'Custom version… (type an exact version, e.g. 1.0.0)',
+            value: 'custom',
+          },
         ],
       },
     ]));
+
+    if (updateType === 'custom') {
+      ({ newVersion } = await inquirer.prompt([
+        {
+          type: 'input',
+          name: 'newVersion',
+          message: `Version to release (current: ${oldVersion}):`,
+          default: oldVersion,
+          filter: v => v.trim().replace(/^v/, ''),
+          validate: v => validateExplicitVersion(v, oldVersion),
+        },
+      ]));
+    }
   }
+
+  if (newVersion === null) newVersion = incVersion(oldVersion, updateType);
 
   let versionUpdated = false;
   let buildCompleted = false;
   let bumpCommitted = false;
 
   try {
-    const newVersion = incVersion(oldVersion, updateType);
-
     appJson.expo.version = newVersion;
     appJson.expo.ios.buildNumber = String(
       (parseInt(appJson.expo.ios.buildNumber, 10) || 0) + 1,
@@ -272,19 +380,32 @@ async function main() {
       await runCommand('rm', ['-rf', `${process.env.HOME}/.expo`]);
 
       console.log('\nLogging into Expo...');
-      await runCommand('eas', ['login']);
+      await runStep('Expo login', () => runCommand('eas', ['login']), {
+        skip: 'continue with the current Expo session',
+      });
     }
 
     console.log('\nStarting EAS build for iOS...');
 
-    await runCommand('npx', [
-      'eas-cli',
-      'build',
-      '--platform',
-      'ios',
-    ]);
+    // No plain skip: without a build there is nothing to release. But the CLI
+    // can lose its connection while the build itself finishes on EAS, and
+    // retrying then would queue a second build with the same buildNumber.
+    const buildResult = await runStep(
+      'EAS build',
+      () => runCommand('npx', ['eas-cli', 'build', '--platform', 'ios']),
+      {
+        extraChoices: [
+          {
+            name: 'Continue: the build actually finished on expo.dev',
+            value: 'finished',
+          },
+        ],
+      },
+    );
 
-    console.log('iOS build complete.');
+    console.log(
+      buildResult === 'finished' ? 'Continuing with the build on expo.dev.' : 'iOS build complete.',
+    );
 
     buildCompleted = true;
 
@@ -296,16 +417,37 @@ async function main() {
 
     const commitMessage = `chore(release): v${newVersion}`;
 
-    await runGit(['add', 'app.json', 'package.json']);
-    // --no-verify: this is a machine-generated version bump of two JSON files.
-    // Project pre-commit hooks (e.g. `prettier --check`, `tsc --noEmit`) would
-    // otherwise gate the release on unrelated repo state and abort the commit.
-    await runGit(['commit', '--no-verify', '-m', commitMessage]);
-    await runGit(['push']);
+    const commitResult = await runStep(
+      'Committing the version bump',
+      async () => {
+        await runGit(['add', 'app.json', 'package.json']);
+        // --no-verify: this is a machine-generated version bump of two JSON
+        // files. Project pre-commit hooks (e.g. `prettier --check`,
+        // `tsc --noEmit`) would otherwise gate the release on unrelated repo
+        // state and abort the commit.
+        await runGit(['commit', '--no-verify', '-m', commitMessage]);
+      },
+      { skip: 'leave app.json and package.json bumped but uncommitted' },
+    );
 
+    // Past this point the bump is either committed or deliberately left in
+    // the working tree; an abort must not tell the user to commit it again.
     bumpCommitted = true;
 
-    console.log(`Pushed: ${commitMessage}`);
+    if (commitResult === 'skipped') {
+      console.log(
+        `Not committed. Later: git add app.json package.json && git commit -m "${commitMessage}" && git push`,
+      );
+    } else {
+      const pushResult = await runStep('git push', () => runGit(['push']), {
+        skip: 'keep the commit local and push later',
+      });
+      console.log(
+        pushResult === 'skipped'
+          ? `Committed locally, not pushed: ${commitMessage}. Run git push later.`
+          : `Pushed: ${commitMessage}`,
+      );
+    }
 
     const { submitIos } = await inquirer.prompt([
       {
@@ -338,26 +480,35 @@ async function main() {
 
       console.log('\nSubmitting to TestFlight...');
 
-      await runCommand('env', [
-        '-u',
-        'NODE_EXTRA_CA_CERTS',
-        '-u',
-        'SSL_CERT_FILE',
-        '-u',
-        'HTTPS_PROXY',
-        '-u',
-        'HTTP_PROXY',
-        '-u',
-        'NODE_TLS_REJECT_UNAUTHORIZED',
-        'npx',
-        'eas-cli',
-        'submit',
-        '--platform',
-        'ios',
-        '--latest',
-      ]);
+      const submitResult = await runStep(
+        'TestFlight submit',
+        () =>
+          runCommand('env', [
+            '-u',
+            'NODE_EXTRA_CA_CERTS',
+            '-u',
+            'SSL_CERT_FILE',
+            '-u',
+            'HTTPS_PROXY',
+            '-u',
+            'HTTP_PROXY',
+            '-u',
+            'NODE_TLS_REJECT_UNAUTHORIZED',
+            'npx',
+            'eas-cli',
+            'submit',
+            '--platform',
+            'ios',
+            '--latest',
+          ]),
+        { skip: 'submit later with `npx eas-cli submit --platform ios --latest`' },
+      );
 
-      console.log('Submitted to TestFlight.');
+      console.log(
+        submitResult === 'skipped'
+          ? 'Skipped TestFlight submission. Later: npx eas-cli submit --platform ios --latest'
+          : 'Submitted to TestFlight.',
+      );
     } else {
       console.log('Skipped TestFlight submission.');
     }

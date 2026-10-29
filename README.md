@@ -13,7 +13,7 @@ Installed straight from GitHub (no npm registry needed):
 
 ```bash
 # pin to a tag (recommended)
-npm i -D github:matias9477/expo-release#v1.3.0
+npm i -D github:matias9477/expo-release#v1.4.0
 
 # track latest on master
 npm i -D github:matias9477/expo-release#master
@@ -36,7 +36,15 @@ Run it from the project root:
 
 ```bash
 npm run release
+
+# skip the bump menu and release an exact version (note the `--`)
+npm run release -- --version 1.0.0
 ```
+
+`--version` (and the menu's **Custom version…** choice) accepts any `x.y.z`
+that is not lower than the current version. Passing the current version
+ships a new build of it, e.g. a fresh scaffold at `1.0.0` going out as
+`1.0.0`.
 
 ## Configuration
 
@@ -62,8 +70,9 @@ See `release.config.example.json`.
 1. Verifies `app.json` and `package.json` versions match.
 2. Detects a first release (no prior `chore(release):` commit or `v*` tag in
    git history) and offers to ship the current version without bumping.
-3. Otherwise prompts for the bump type (patch / minor / major), showing the
-   actual version each choice would release.
+3. Otherwise prompts for the bump type (patch / minor / major / custom),
+   showing the actual version each choice would release. `--version x.y.z`
+   skips steps 2 and 3.
 4. Bumps both files and increments iOS `buildNumber`, then formats them with
    the project's own formatter: Biome (`node_modules/.bin/biome`) if installed,
    otherwise Prettier (`node_modules/.bin/prettier`), otherwise left as is.
@@ -72,7 +81,14 @@ See `release.config.example.json`.
 7. Commits `chore(release): v<version>` and pushes.
 8. Optionally `eas submit --platform ios --latest` to TestFlight.
 
-If the release fails before the EAS build is created, `app.json` and
+Every external step (`eas login`, the EAS build, the bump commit, `git push`,
+the TestFlight submit) asks what to do when it fails: **Retry**, **Abort**,
+or **Skip** where skipping is safe (login, commit, push, submit; the hint
+prints the command to finish by hand). A failed build can't be skipped, but
+if the CLI dropped while the build finished on expo.dev you can continue
+with that build instead of queuing a duplicate.
+
+If the release is aborted before the EAS build is created, `app.json` and
 `package.json` are reverted to their original contents. Once the build
 exists on EAS, the version bump is committed immediately — a TestFlight
 failure can no longer leave the repo out of sync with a build that was
