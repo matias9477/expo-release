@@ -13,7 +13,7 @@ Installed straight from GitHub (no npm registry needed):
 
 ```bash
 # pin to a tag (recommended)
-npm i -D github:matias9477/expo-release#v1.2.0
+npm i -D github:matias9477/expo-release#v1.3.0
 
 # track latest on master
 npm i -D github:matias9477/expo-release#master
@@ -65,7 +65,8 @@ See `release.config.example.json`.
 3. Otherwise prompts for the bump type (patch / minor / major), showing the
    actual version each choice would release.
 4. Bumps both files and increments iOS `buildNumber`, then formats them with
-   the project's Prettier (`node_modules/.bin/prettier`) when it is installed.
+   the project's own formatter: Biome (`node_modules/.bin/biome`) if installed,
+   otherwise Prettier (`node_modules/.bin/prettier`), otherwise left as is.
 5. (Optional, `cleanSessions`) clears cached Expo/Apple sessions and runs `eas login`.
 6. Runs `eas build --platform ios`.
 7. Commits `chore(release): v<version>` and pushes.

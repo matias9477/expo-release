@@ -43,27 +43,38 @@ function quoteArgs(args) {
 }
 
 /**
- * JSON.stringify expands every array, which the project's Prettier may
- * collapse, so a raw bump would fail a `prettier --check` hook on the next
- * commit. Formats both files with the project's own Prettier when it has one;
- * a formatting failure is only a warning and never blocks the release.
+ * JSON.stringify expands every array, which the project's formatter may
+ * collapse, so a raw bump would fail its format check (`biome check`, a
+ * `prettier --check` hook) on the next commit. Formats both files with the
+ * project's own Biome, or Prettier when it has no Biome; a formatting
+ * failure is only a warning and never blocks the release.
  */
+const FORMATTERS = [
+  { name: 'Biome', bin: 'biome', args: ['format', '--write'] },
+  { name: 'Prettier', bin: 'prettier', args: ['--write', '--log-level=warn'] },
+];
+
 function formatJsonFiles() {
-  const prettierBin = path.join(process.cwd(), 'node_modules', '.bin', 'prettier');
-  if (!fs.existsSync(prettierBin)) return Promise.resolve();
+  const formatter = FORMATTERS.map(f => ({
+    ...f,
+    path: path.join(process.cwd(), 'node_modules', '.bin', f.bin),
+  })).find(f => fs.existsSync(f.path));
+  if (!formatter) return Promise.resolve();
 
   return new Promise(resolve => {
-    const proc = spawn(prettierBin, ['--write', '--log-level=warn', appJsonPath, pkgJsonPath], {
+    const proc = spawn(formatter.path, [...formatter.args, appJsonPath, pkgJsonPath], {
       stdio: 'inherit',
       shell: false,
     });
 
     proc.on('error', err => {
-      console.warn(`Could not run Prettier on the version bump: ${err.message}`);
+      console.warn(`Could not run ${formatter.name} on the version bump: ${err.message}`);
       resolve();
     });
     proc.on('close', code => {
-      if (code !== 0) console.warn(`Prettier exited with code ${code}; the bump is left unformatted.`);
+      if (code !== 0) {
+        console.warn(`${formatter.name} exited with code ${code}; the bump is left unformatted.`);
+      }
       resolve();
     });
   });
