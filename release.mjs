@@ -42,6 +42,33 @@ function quoteArgs(args) {
     .join(' ');
 }
 
+/**
+ * JSON.stringify expands every array, which the project's Prettier may
+ * collapse, so a raw bump would fail a `prettier --check` hook on the next
+ * commit. Formats both files with the project's own Prettier when it has one;
+ * a formatting failure is only a warning and never blocks the release.
+ */
+function formatJsonFiles() {
+  const prettierBin = path.join(process.cwd(), 'node_modules', '.bin', 'prettier');
+  if (!fs.existsSync(prettierBin)) return Promise.resolve();
+
+  return new Promise(resolve => {
+    const proc = spawn(prettierBin, ['--write', '--log-level=warn', appJsonPath, pkgJsonPath], {
+      stdio: 'inherit',
+      shell: false,
+    });
+
+    proc.on('error', err => {
+      console.warn(`Could not run Prettier on the version bump: ${err.message}`);
+      resolve();
+    });
+    proc.on('close', code => {
+      if (code !== 0) console.warn(`Prettier exited with code ${code}; the bump is left unformatted.`);
+      resolve();
+    });
+  });
+}
+
 function runGit(args) {
   return new Promise((resolve, reject) => {
     const proc = spawn('git', args, { stdio: 'inherit', shell: false });
@@ -203,6 +230,7 @@ async function main() {
 
     writeJson(appJsonPath, appJson);
     writeJson(pkgJsonPath, pkgJson);
+    await formatJsonFiles();
 
     versionUpdated = true;
 
